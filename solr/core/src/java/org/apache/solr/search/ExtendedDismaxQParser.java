@@ -298,41 +298,76 @@ public class ExtendedDismaxQParser extends QParser {
    * @return the resulting query with "min should match" rules applied as specified in the config.
    * @see #parseEscapedQuery
    */
-   protected Query parseOriginalQuery(ExtendedSolrQueryParser up,
-      String mainUserQuery, List<Clause> clauses, ExtendedDismaxConfiguration config) {
-    
-    Query query = null;
-    try {
-      up.setRemoveStopFilter(!config.stopwords);
-      up.exceptions = true;
-      query = up.parse(mainUserQuery);
-      
-      if (shouldRemoveStopFilter(config, query)) {
-        // if the query was all stop words, remove none of them
-        up.setRemoveStopFilter(true);
-        query = up.parse(mainUserQuery);          
-      }
-    } catch (Exception e) {
-      // ignore failure and reparse later after escaping reserved chars
-      up.exceptions = false;
-    }
-    
-    if(query == null) {
-      return null;
-    }
-    // For correct lucene queries, turn off mm processing if no explicit mm spec was provided
-    // and there were explicit operators (except for AND).
-    if (query instanceof BooleanQuery) {
-      // config.minShouldMatch holds the value of mm which MIGHT have come from the user,
-      // but could also have been derived from q.op.
-      String mmSpec = config.minShouldMatch;
+  protected Query parseOriginalQuery(ExtendedSolrQueryParser up,
+          String mainUserQuery, List<Clause> clauses, ExtendedDismaxConfiguration config) {
 
-      if (foundOperators(clauses, config.lowercaseOperators)) {
-        mmSpec = params.get(DisMaxParams.MM, "0%"); // Use provided mm spec if present, otherwise turn off mm processing
+      Query query = null;
+      try {
+          up.setRemoveStopFilter(!config.stopwords);
+          up.exceptions = true;
+          query = up.parse(mainUserQuery);
+
+          if (shouldRemoveStopFilter(config, query)) {
+              // if the query was all stop words, remove none of them
+              up.setRemoveStopFilter(true);
+              query = up.parse(mainUserQuery);
+          }
+      } catch (Exception e) {
+          // ignore failure and reparse later after escaping reserved chars
+          up.exceptions = false;
       }
-      query = SolrPluginUtils.setMinShouldMatch((BooleanQuery)query, mmSpec, config.mmAutoRelax);
+
+      if(query == null) {
+          return null;
+      }
+
+      // solr 4.10
+      Boolean mmExplicitOff = params.getBool("mm.explicitOff", false);
+      if (mmExplicitOff) {
+          // For correct lucene queries, turn off mm processing if there
+          // were explicit operators (except for AND).
+          boolean doMinMatched = doMinMatched(clauses, config.lowercaseOperators);
+          if (doMinMatched && query instanceof BooleanQuery) {
+              query = SolrPluginUtils.setMinShouldMatch((BooleanQuery)query, config.minShouldMatch);
+          }
+          return query;
+      }
+
+      // solr 7.5
+      // For correct lucene queries, turn off mm processing if no explicit mm spec was provided
+      // and there were explicit operators (except for AND).
+      if (query instanceof BooleanQuery) {
+          // config.minShouldMatch holds the value of mm which MIGHT have come from the user,
+          // but could also have been derived from q.op.
+          String mmSpec = config.minShouldMatch;
+
+          if (foundOperators(clauses, config.lowercaseOperators)) {
+              mmSpec = params.get(DisMaxParams.MM, "0%"); // Use provided mm spec if present, otherwise turn off mm processing
+          }
+          query = SolrPluginUtils.setMinShouldMatch((BooleanQuery)query, mmSpec, config.mmAutoRelax);
+      }
+      return query;
+  }
+
+  /**
+   * Returns false if at least one of the clauses is an explicit operator (except for AND)
+   */
+  private boolean doMinMatched(List<Clause> clauses, boolean lowercaseOperators) {
+    for (Clause clause : clauses) {
+      if (clause.must == '+') return false;
+      if (clause.must == '-') return false;
+      if (clause.isBareWord()) {
+        String s = clause.val;
+        if ("OR".equals(s)) {
+          return false;
+        } else if ("NOT".equals(s)) {
+          return false;
+        } else if (lowercaseOperators && "or".equals(s)) {
+          return false;
+        }
+      }
     }
-    return query;
+    return true;
   }
 
   /**
